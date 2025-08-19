@@ -1,0 +1,177 @@
+<%
+' ===================================================================
+' ASP Security Helper Functions - Include this file in all your ASP pages
+' Save as: includes/security.asp
+' Usage: <!--#include file="includes/security.asp"-->
+' ===================================================================
+
+' HTML Encode function - prevents XSS by encoding special characters
+Function HTMLEncode(strText)
+    If IsNull(strText) Or strText = "" Then
+        HTMLEncode = ""
+        Exit Function
+    End If
+    
+    Dim strResult
+    strResult = CStr(strText)
+    
+    ' Replace dangerous characters with HTML entities
+    strResult = Replace(strResult, "&", "&amp;")
+    strResult = Replace(strResult, "<", "&lt;")
+    strResult = Replace(strResult, ">", "&gt;")
+    strResult = Replace(strResult, """", "&quot;")
+    strResult = Replace(strResult, "'", "&#39;")
+    strResult = Replace(strResult, "/", "&#47;")
+    strResult = Replace(strResult, "\", "&#92;")
+    
+    HTMLEncode = strResult
+End Function
+
+' JavaScript Encode function - for data going into JavaScript
+Function JSEncode(strText)
+    If IsNull(strText) Or strText = "" Then
+        JSEncode = ""
+        Exit Function
+    End If
+    
+    Dim strResult
+    strResult = CStr(strText)
+    
+    ' Escape characters dangerous in JavaScript
+    strResult = Replace(strResult, "\", "\\")
+    strResult = Replace(strResult, """", "\""")
+    strResult = Replace(strResult, "'", "\'")
+    strResult = Replace(strResult, vbCrLf, "\n")
+    strResult = Replace(strResult, vbCr, "\n")
+    strResult = Replace(strResult, vbLf, "\n")
+    strResult = Replace(strResult, "</", "<\/")
+    
+    JSEncode = strResult
+End Function
+
+' URL Encode function - for URLs and query strings
+Function URLEncode(strText)
+    If IsNull(strText) Or strText = "" Then
+        URLEncode = ""
+        Exit Function
+    End If
+    
+    URLEncode = Server.URLEncode(CStr(strText))
+End Function
+
+' Attribute Encode function - for HTML attributes
+Function AttrEncode(strText)
+    If IsNull(strText) Or strText = "" Then
+        AttrEncode = ""
+        Exit Function
+    End If
+    
+    Dim strResult
+    strResult = CStr(strText)
+    
+    ' Encode for HTML attributes
+    strResult = Replace(strResult, "&", "&amp;")
+    strResult = Replace(strResult, "<", "&lt;")
+    strResult = Replace(strResult, ">", "&gt;")
+    strResult = Replace(strResult, """", "&quot;")
+    strResult = Replace(strResult, "'", "&#39;")
+    strResult = Replace(strResult, vbTab, "&#9;")
+    strResult = Replace(strResult, vbCrLf, "&#13;&#10;")
+    strResult = Replace(strResult, vbCr, "&#13;")
+    strResult = Replace(strResult, vbLf, "&#10;")
+    
+    AttrEncode = strResult
+End Function
+
+' Safe Request function - gets and encodes request values
+Function SafeRequest(strKey, strType)
+    Dim strValue
+    
+    Select Case UCase(strType)
+        Case "FORM"
+            strValue = Request.Form(strKey)
+        Case "QUERY", "QUERYSTRING"
+            strValue = Request.QueryString(strKey)
+        Case "COOKIE"
+            strValue = Request.Cookies(strKey)
+        Case Else
+            strValue = Request(strKey)
+    End Select
+    
+    SafeRequest = HTMLEncode(strValue)
+End Function
+
+' Input validation function
+Function ValidateInput(strInput, strType, intMaxLength)
+    If IsNull(strInput) Then
+        ValidateInput = False
+        Exit Function
+    End If
+    
+    Dim strValue
+    strValue = Trim(CStr(strInput))
+    
+    ' Check length
+    If Len(strValue) > intMaxLength Then
+        ValidateInput = False
+        Exit Function
+    End If
+    
+    ' Validate based on type
+    Select Case UCase(strType)
+        Case "EMAIL"
+            If Not IsValidEmail(strValue) Then
+                ValidateInput = False
+                Exit Function
+            End If
+        Case "NUMERIC"
+            If Not IsNumeric(strValue) Then
+                ValidateInput = False
+                Exit Function
+            End If
+        Case "ALPHANUMERIC"
+            If Not IsAlphaNumeric(strValue) Then
+                ValidateInput = False
+                Exit Function
+            End If
+    End Select
+    
+    ValidateInput = True
+End Function
+
+' Helper function to check if email is valid
+Function IsValidEmail(strEmail)
+    Dim regEx
+    Set regEx = New RegExp
+    regEx.Pattern = "^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$"
+    IsValidEmail = regEx.Test(strEmail)
+    Set regEx = Nothing
+End Function
+
+' Helper function to check if string is alphanumeric
+Function IsAlphaNumeric(strValue)
+    Dim regEx
+    Set regEx = New RegExp
+    regEx.Pattern = "^[a-zA-Z0-9]+$"
+    IsAlphaNumeric = regEx.Test(strValue)
+    Set regEx = Nothing
+End Function
+
+' Strip HTML tags function
+Function StripHTML(strText)
+    If IsNull(strText) Or strText = "" Then
+        StripHTML = ""
+        Exit Function
+    End If
+    
+    Dim regEx
+    Set regEx = New RegExp
+    regEx.IgnoreCase = True
+    regEx.Global = True
+    regEx.Pattern = "<[^>]+>"
+    
+    StripHTML = regEx.Replace(strText, "")
+    Set regEx = Nothing
+End Function
+
+%>
