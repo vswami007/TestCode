@@ -1,0 +1,305 @@
+# Test with preview first
+#  .\asp-xss-fixer.ps1 -FolderPath "C:\TestASPProject" -PreviewOnly
+#
+# Then apply the fixes
+#  .\asp-xss-fixer.ps1 -FolderPath "C:\TestASPProject" -CreateBackup
+param(
+    [Parameter(Mandatory=$false, HelpMessage="Path to the folder containing ASP files")]
+    [string]$FolderPath ,
+    
+    [Parameter(Mandatory=$false, HelpMessage="Create backup files before making changes")]
+    [switch]$CreateBackup = $true,
+    
+    [Parameter(Mandatory=$false, HelpMessage="Show preview without making actual changes")]
+    [switch]$PreviewOnly= $false,
+    
+    [Parameter(Mandatory=$false, HelpMessage="Output log to file")]
+    [string]$LogFile = $null
+)
+
+# Validate folder path
+if (!(Test-Path -Path $FolderPath -PathType Container)) {
+    Write-Error "The specified folder path does not exist: $FolderPath"
+    exit 1
+}
+
+# Initialize counters and results
+$processedFiles = 0
+$fixedFiles = 0
+$totalFixes = 0
+$logEntries = @()
+
+# Define the include statement to add
+$includeStatement = '<!--#include file="xsshelper.asp"-->'
+
+# Define patterns for different vulnerable scenarios and their fixes
+$fixPatterns = @{
+    # Response.Write with Request patterns
+    'Response\.Write\s*\(\s*(Request\.(?:QueryString|Form|ServerVariables)\s*\([^)]+\)|Request\s*\([^)]+\))\s*\)' = {
+        param($match)
+        $requestPart = $match.Groups[1].Value
+        return "Response.Write(HtmlEncode($requestPart))"
+    }
+    
+    # Response.Write with direct Request (no parentheses)  
+    'Response\.Write\s+(Request\.(?:QueryString|Form|ServerVariables)\s*\([^)]+\)|Request\s*\([^)]+\))(?!\s*\))' = {
+        param($match)
+        $requestPart = $match.Groups[1].Value
+        return "Response.Write(HtmlEncode($requestPart))"
+    }
+    
+    # ASP output tags <%=Request...%>
+    '<%\s*=\s*(Request\.(?:QueryString|Form|ServerVariables)\s*\([^)]+\)|Request\s*\([^)]+\))\s*%>' = {
+        param($match)
+        $requestPart = $match.Groups[1].Value
+        return "<%=HtmlEncode($requestPart)%>"
+    }
+}
+
+function Write-Log {
+    param([string]$Message, [string]$Level = "INFO")
+    
+    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    $logEntry = "[$timestamp] [$Level] $Message"
+    
+    $color = switch ($Level) {
+        "ERROR" { "Red" }
+        "WARNING" { "Yellow" }
+        "SUCCESS" { "Green" }
+        "INFO" { "White" }
+        default { "White" }
+    }
+    
+    Write-Host $logEntry -ForegroundColor $color
+    $script:logEntries += $logEntry
+}
+
+function Add-IncludeStatement {
+    param([string]$Content, [string]$FilePath)
+    
+    # Check if include already exists
+    if ($Content -match '<!--\s*#include\s+file\s*=\s*["\'']*xsshelper\.asp["\'']*\s*-->') {
+        Write-Log -Message "Include statement already exists in $FilePath" -Level "INFO"
+        return $Content
+    }
+    
+    # Try to add after existing includes, or at the beginning
+    if ($Content -match '(<!--\s*#include[^>]+-->\s*\r?\n?)') {
+        # Add after last include
+        $lastIncludeIndex = 0
+        $matches = [regex]::Matches($Content, '<!--\s*#include[^>]+-->\s*\r?\n?')
+        if ($matches.Count -gt 0) {
+            $lastMatch = $matches[$matches.Count - 1]
+            $lastIncludeIndex = $lastMatch.Index + $lastMatch.Length
+            $Content = $Content.Insert($lastIncludeIndex, "$includeStatement`r`n")
+        }
+    } elseif ($Content -match '<%@[^%]*%>\s*\r?\n?') {
+        # Add after page directives
+        $pageDirectiveMatch = [regex]::Match($Content, '<%@[^%]*%>\s*\r?\n?')
+        $insertIndex = $pageDirectiveMatch.Index + $pageDirectiveMatch.Length
+        $Content = $Content.Insert($insertIndex, "$includeStatement`r`n")
+    } else {
+        # Add at the very beginning
+        $Content = "$includeStatement`r`n$Content"
+    }
+    
+    Write-Log -Message "Added include statement to $FilePath" -Level "SUCCESS"
+    return $Content
+}
+
+function Fix-XSSVulnerabilities {
+    param([string]$Content, [string]$FilePath)
+    
+    $fixedContent = $Content
+    $fileFixCount = 0
+    
+    foreach ($pattern in $fixPatterns.Keys) {
+        $scriptBlock = $fixPatterns[$pattern]
+        $matches = [regex]::Matches($fixedContent, $pattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+        
+        # Process matches in reverse order to avoid index shifting
+        for ($i = $matches.Count - 1; $i -ge 0; $i--) {
+            $match = $matches[$i]
+            
+            # Check if already wrapped with HtmlEncode
+            $beforeMatch = $fixedContent.Substring([Math]::Max(0, $match.Index - 20), [Math]::Min(20, $match.Index))
+            if ($beforeMatch -match 'HtmlEncode\s*\(\s*$') {
+                continue # Skip if already encoded
+            }
+            
+            $replacement = & $scriptBlock $match
+            $fixedContent = $fixedContent.Remove($match.Index, $match.Length).Insert($match.Index, $replacement)
+            $fileFixCount++
+            
+            # Get line number for logging
+            $lineNumber = ($fixedContent.Substring(0, $match.Index) -split "`n").Count
+            Write-Log -Message "Fixed XSS vulnerability at line $lineNumber in $FilePath" -Level "SUCCESS"
+            Write-Log -Message "  Original: $($match.Value)" -Level "INFO"
+            Write-Log -Message "  Fixed:    $replacement" -Level "INFO"
+        }
+    }
+    
+    return @{
+        Content = $fixedContent
+        FixCount = $fileFixCount
+    }
+}
+
+function Create-XSSHelperFile {
+    param([string]$FolderPath)
+    
+    $helperFilePath = Join-Path -Path $FolderPath -ChildPath "xsshelper.asp"
+    
+    if (Test-Path -Path $helperFilePath) {
+        Write-Log -Message "xsshelper.asp already exists at $helperFilePath" -Level "WARNING"
+        return
+    }
+    
+    $helperContent = @"
+<%
+' XSS Helper Functions
+' Auto-generated by ASP XSS Fixer Script
+
+Function HtmlEncode(str)
+    If IsNull(str) Or IsEmpty(str) Then
+        HtmlEncode = ""
+        Exit Function
+    End If
+    
+    ' Convert to string if it is not already
+    str = CStr(str)
+    
+    ' Replace in specific order to avoid double-encoding
+    str = Replace(str, "&", "&amp;")
+    str = Replace(str, "<", "&lt;")
+    str = Replace(str, ">", "&gt;")
+    str = Replace(str, """", "&quot;")
+    str = Replace(str, "'", "&#39;")
+    
+    HtmlEncode = str
+End Function
+
+' Additional helper functions for other contexts
+Function UrlEncode(str)
+    If IsNull(str) Or IsEmpty(str) Then
+        UrlEncode = ""
+        Exit Function
+    End If
+    UrlEncode = Server.URLEncode(CStr(str))
+End Function
+
+Function JsEncode(str)
+    If IsNull(str) Or IsEmpty(str) Then
+        JsEncode = ""
+        Exit Function
+    End If
+    str = CStr(str)
+    str = Replace(str, "\", "\\")
+    str = Replace(str, """", "\""")
+    str = Replace(str, "'", "\'")
+    str = Replace(str, vbCrLf, "\n")
+    str = Replace(str, vbLf, "\n")
+    str = Replace(str, vbTab, "\t")
+    JsEncode = str
+End Function
+%>
+"@
+
+    if (!$PreviewOnly) {
+        $helperContent | Out-File -FilePath $helperFilePath -Encoding ASCII
+        Write-Log -Message "Created xsshelper.asp at $helperFilePath" -Level "SUCCESS"
+    } else {
+        Write-Log -Message "Would create xsshelper.asp at $helperFilePath" -Level "INFO"
+    }
+}
+
+# Main execution
+Write-Log -Message "Starting Classic ASP XSS Auto-Fixer" -Level "INFO"
+Write-Log -Message "Target folder: $FolderPath" -Level "INFO"
+Write-Log -Message "Preview mode: $PreviewOnly" -Level "INFO"
+Write-Log -Message "Create backup: $CreateBackup" -Level "INFO"
+
+# Create the XSS helper file
+Create-XSSHelperFile -FolderPath $FolderPath
+
+# Get all Classic ASP files
+$aspFiles = Get-ChildItem -Path $FolderPath -Recurse -Include "*.asp" -File
+
+if ($aspFiles.Count -eq 0) {
+    Write-Log -Message "No Classic ASP files found in the specified directory." -Level "WARNING"
+    exit 0
+}
+
+Write-Log -Message "Found $($aspFiles.Count) Classic ASP files to process" -Level "INFO"
+
+foreach ($file in $aspFiles) {
+    $processedFiles++
+    Write-Progress -Activity "Processing ASP files" -Status "Processing: $($file.Name)" -PercentComplete (($processedFiles / $aspFiles.Count) * 100)
+    
+    try {
+        $originalContent = Get-Content -Path $file.FullName -Raw -Encoding UTF8
+        
+        # Skip the helper file itself
+        if ($file.Name -eq "xsshelper.asp") {
+            Write-Log -Message "Skipping xsshelper.asp" -Level "INFO"
+            continue
+        }
+        
+        # Add include statement
+        $contentWithInclude = Add-IncludeStatement -Content $originalContent -FilePath $file.Name
+        
+        # Fix XSS vulnerabilities
+        $fixResult = Fix-XSSVulnerabilities -Content $contentWithInclude -FilePath $file.Name
+        $finalContent = $fixResult.Content
+        $fileFixCount = $fixResult.FixCount
+        
+        # Check if any changes were made
+        $hasChanges = ($originalContent -ne $finalContent)
+        
+        if ($hasChanges) {
+            $fixedFiles++
+            $totalFixes += $fileFixCount
+            
+            if (!$PreviewOnly) {
+                # Create backup if requested
+                if ($CreateBackup) {
+                    $backupPath = "$($file.FullName).bak"
+                    Copy-Item -Path $file.FullName -Destination $backupPath -Force
+                    Write-Log -Message "Created backup: $backupPath" -Level "INFO"
+                }
+                
+                # Write the fixed content
+                $finalContent | Out-File -FilePath $file.FullName -Encoding UTF8 -NoNewline
+                Write-Log -Message "Applied fixes to $($file.Name) ($fileFixCount vulnerabilities fixed)" -Level "SUCCESS"
+            } else {
+                Write-Log -Message "Would fix $fileFixCount vulnerabilities in $($file.Name)" -Level "INFO"
+            }
+        } else {
+            Write-Log -Message "No changes needed for $($file.Name)" -Level "INFO"
+        }
+        
+    } catch {
+        Write-Log -Message "Error processing $($file.FullName): $($_.Exception.Message)" -Level "ERROR"
+    }
+}
+
+Write-Progress -Activity "Processing ASP files" -Completed
+
+# Summary
+Write-Log -Message "==================== SUMMARY ====================" -Level "INFO"
+Write-Log -Message "Files processed: $processedFiles" -Level "INFO"
+Write-Log -Message "Files modified: $fixedFiles" -Level "SUCCESS"
+Write-Log -Message "Total vulnerabilities fixed: $totalFixes" -Level "SUCCESS"
+
+if ($PreviewOnly) {
+    Write-Log -Message "This was a preview run. No actual changes were made." -Level "WARNING"
+    Write-Log -Message "Run without -PreviewOnly to apply the fixes." -Level "INFO"
+}
+
+# Save log file if specified
+if ($LogFile) {
+    $script:logEntries | Out-File -FilePath $LogFile -Encoding UTF8
+    Write-Log -Message "Log saved to: $LogFile" -Level "INFO"
+}
+
+Write-Log -Message "XSS Auto-Fixer completed!" -Level "SUCCESS"
