@@ -1,0 +1,255 @@
+# Enhanced PowerShell script to detect and fix XSS vulnerabilities in Classic ASP
+# This version tracks variables assigned from request objects and their usage
+
+param(
+    [Parameter(Mandatory=$false)]
+    [string]$FolderPath,
+    
+    [Parameter(Mandatory=$false)]
+    [string]$BackupFolder = "",
+    
+    [Parameter(Mandatory=$false)]
+    [switch]$WhatIf = $true
+)
+
+function Write-Log {
+    param([string]$Message, [string]$Level = "INFO")
+    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    Write-Host "[$timestamp] [$Level] $Message"
+}
+
+function Get-HtmlEncodeFunction {
+    return @'
+Function HtmlEncode(str)
+    If IsNull(str) Or IsEmpty(str) Then
+        HtmlEncode = ""
+        Exit Function
+    End If
+    
+    ' Convert to string if it is not already
+    str = CStr(str)
+    
+    ' Replace in specific order to avoid double-encoding
+    str = Replace(str, "&", "&amp;")
+    str = Replace(str, "<", "&lt;")
+    str = Replace(str, ">", "&gt;")
+    str = Replace(str, """", "&quot;")
+    str = Replace(str, "'", "&#39;")
+    
+    HtmlEncode = str
+End Function
+
+'@
+}
+
+function Find-RequestVariables {
+    param([string]$Content)
+    
+    $requestVars = @{}
+    
+    # Pattern to match variable assignments from request objects
+    $patterns = @(
+        '(?i)(\w+)\s*=\s*request\.form\s*\(\s*["\'']+([^"'']+)["\'']+\s*\)',
+        '(?i)(\w+)\s*=\s*request\.querystring\s*\(\s*["\'']+([^"'']+)["\'']+\s*\)',
+        '(?i)(\w+)\s*=\s*request\s*\(\s*["\'']+([^"'']+)["\'']+\s*\)',
+        '(?i)(\w+)\s*=\s*request\.form\s*\(\s*(\w+)\s*\)',
+        '(?i)(\w+)\s*=\s*request\.querystring\s*\(\s*(\w+)\s*\)',
+        '(?i)(\w+)\s*=\s*request\s*\(\s*(\w+)\s*\)'
+    )
+    
+    foreach ($pattern in $patterns) {
+        $matches = [regex]::Matches($Content, $pattern)
+        foreach ($match in $matches) {
+            $varName = $match.Groups[1].Value
+            $requestParam = $match.Groups[2].Value
+            $requestVars[$varName] = @{
+                'Parameter' = $requestParam
+                'OriginalMatch' = $match.Value
+                'Index' = $match.Index
+            }
+        }
+    }
+    
+    return $requestVars
+}
+
+function Find-VulnerableOutputs {
+    param([string]$Content, [hashtable]$RequestVars)
+    
+    $vulnerabilities = @()
+    
+    # Direct request object usage in outputs
+    $directPatterns = @(
+        '(?i)response\.write\s*\(\s*(request\.form\s*\([^)]+\))',
+        '(?i)response\.write\s*\(\s*(request\.querystring\s*\([^)]+\))',
+        '(?i)response\.write\s*\(\s*(request\s*\([^)]+\))',
+        '(?i)<%=\s*(request\.form\s*\([^)]+\))\s*%>',
+        '(?i)<%=\s*(request\.querystring\s*\([^)]+\))\s*%>',
+        '(?i)<%=\s*(request\s*\([^)]+\))\s*%>'
+    )
+    
+    foreach ($pattern in $directPatterns) {
+        $matches = [regex]::Matches($Content, $pattern)
+        foreach ($match in $matches) {
+            $vulnerabilities += @{
+                'Type' = 'Direct'
+                'Match' = $match.Value
+                'VulnerableCode' = $match.Groups[1].Value
+                'Index' = $match.Index
+                'Length' = $match.Length
+            }
+        }
+    }
+    
+    # Variable usage in outputs (the case you mentioned)
+    foreach ($varName in $RequestVars.Keys) {
+        # Look for this variable being output
+        $varPatterns = @(
+            "(?i)response\.write\s*\(\s*$varName\s*\)",
+            "(?i)<%=\s*$varName\s*%>",
+            "(?i)<[^>]*=\s*`"?<%=\s*$varName\s*%>`"?[^>]*>",
+            "(?i)<[^>]*value\s*=\s*`"?<%=\s*$varName\s*%>`"?[^>]*>",
+            "(?i)<input[^>]*value\s*=\s*`"?<%=\s*$varName\s*%>`"?[^>]*>"
+        )
+        
+        foreach ($pattern in $varPatterns) {
+            $matches = [regex]::Matches($Content, $pattern)
+            foreach ($match in $matches) {
+                $vulnerabilities += @{
+                    'Type' = 'Variable'
+                    'Match' = $match.Value
+                    'VulnerableCode' = $varName
+                    'VariableInfo' = $RequestVars[$varName]
+                    'Index' = $match.Index
+                    'Length' = $match.Length
+                }
+            }
+        }
+    }
+    
+    return $vulnerabilities
+}
+
+function Fix-Vulnerabilities {
+    param([string]$Content, [array]$Vulnerabilities)
+    
+    $fixedContent = $Content
+    $offset = 0
+    
+    # Sort vulnerabilities by index in reverse order to maintain positions
+    $sortedVulns = $Vulnerabilities | Sort-Object Index -Descending
+    
+    foreach ($vuln in $sortedVulns) {
+        $originalMatch = $vuln.Match
+        $index = $vuln.Index
+        
+        $replacement = ""
+        
+        if ($vuln.Type -eq 'Direct') {
+            # Handle direct request object usage
+            $vulnCode = $vuln.VulnerableCode
+            if ($originalMatch -match '(?i)response\.write') {
+                $replacement = $originalMatch -replace [regex]::Escape($vulnCode), "HtmlEncode($vulnCode)"
+            } elseif ($originalMatch -match '(?i)<%=') {
+                $replacement = $originalMatch -replace [regex]::Escape($vulnCode), "HtmlEncode($vulnCode)"
+            }
+        } elseif ($vuln.Type -eq 'Variable') {
+            # Handle variable usage
+            $varName = $vuln.VulnerableCode
+            if ($originalMatch -match '(?i)response\.write') {
+                $replacement = $originalMatch -replace "(?i)$varName", "HtmlEncode($varName)"
+            } elseif ($originalMatch -match '(?i)<%=') {
+                $replacement = $originalMatch -replace "(?i)<%=\s*$varName\s*%>", "<%=HtmlEncode($varName)%>"
+            }
+        }
+        
+        if ($replacement -ne "" -and $replacement -ne $originalMatch) {
+            $fixedContent = $fixedContent.Remove($index, $vuln.Length).Insert($index, $replacement)
+        }
+    }
+    
+    return $fixedContent
+}
+
+function Process-AspFile {
+    param([string]$FilePath)
+    
+    Write-Log "Processing: $FilePath"
+    
+    try {
+        $content = Get-Content -Path $FilePath -Raw -Encoding UTF8
+        $originalContent = $content
+        
+        # Find variables assigned from request objects
+        $requestVars = Find-RequestVariables -Content $content
+        
+        if ($requestVars.Count -gt 0) {
+            Write-Log "Found request variables: $($requestVars.Keys -join ', ')" "DEBUG"
+        }
+        
+        # Find vulnerable outputs
+        $vulnerabilities = Find-VulnerableOutputs -Content $content -RequestVars $requestVars
+        
+        if ($vulnerabilities.Count -eq 0) {
+            Write-Log "No vulnerabilities found in $FilePath" "INFO"
+            return
+        }
+        
+        Write-Log "Found $($vulnerabilities.Count) potential vulnerabilities in $FilePath" "WARNING"
+        
+        foreach ($vuln in $vulnerabilities) {
+            Write-Log "  - $($vuln.Type): $($vuln.Match)" "WARNING"
+        }
+        
+        if ($WhatIf) {
+            Write-Log "WhatIf mode: Would fix $($vulnerabilities.Count) vulnerabilities" "INFO"
+            return
+        }
+        
+        # Fix vulnerabilities
+        $fixedContent = Fix-Vulnerabilities -Content $content -Vulnerabilities $vulnerabilities
+        
+        # Add HtmlEncode function if not present and fixes were made
+        if ($fixedContent -ne $originalContent -and $fixedContent -notmatch '(?i)Function\s+HtmlEncode') {
+            $htmlEncodeFunction = Get-HtmlEncodeFunction
+            $fixedContent = $htmlEncodeFunction + "`r`n" + $fixedContent
+        }
+        
+        # Create backup if specified
+        if ($BackupFolder -ne "" -and $fixedContent -ne $originalContent) {
+            $backupPath = Join-Path $BackupFolder (Split-Path $FilePath -Leaf)
+            Copy-Item -Path $FilePath -Destination $backupPath -Force
+            Write-Log "Backup created: $backupPath"
+        }
+        
+        # Write fixed content
+        if ($fixedContent -ne $originalContent) {
+            Set-Content -Path $FilePath -Value $fixedContent -Encoding UTF8
+            Write-Log "Fixed $($vulnerabilities.Count) vulnerabilities in $FilePath" "SUCCESS"
+        }
+        
+    } catch {
+        Write-Log "Error processing $FilePath : $($_.Exception.Message)" "ERROR"
+    }
+}
+
+# Main execution
+Write-Log "Starting XSS vulnerability scan and fix"
+Write-Log "Target folder: $FolderPath"
+Write-Log "WhatIf mode: $WhatIf"
+
+if ($BackupFolder -ne "" -and -not (Test-Path $BackupFolder)) {
+    New-Item -ItemType Directory -Path $BackupFolder -Force | Out-Null
+    Write-Log "Created backup folder: $BackupFolder"
+}
+
+# Find all ASP files
+$aspFiles = Get-ChildItem -Path $FolderPath -Filter "*.asp" -Recurse
+
+Write-Log "Found $($aspFiles.Count) ASP files to process"
+
+foreach ($file in $aspFiles) {
+    Process-AspFile -FilePath $file.FullName
+}
+
+Write-Log "Processing complete!"
