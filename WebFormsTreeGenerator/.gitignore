@@ -1,0 +1,31 @@
+# Build results
+bin/
+obj/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# Visual Studio cache/options
+.vs/
+.vscode/
+
+# NuGet packages
+*.nupkg
+packages/
+
+# Build outputs
+[Dd]ebug/
+[Dd]ebugPublic/
+[Rr]elease/
+[Rr]eleases/
+x64/
+x86/
+build/
+bld/
+[Bb]in/
+[Oo]bj/
+
+# OS files
+.DS_Store
+Thumbs.db
